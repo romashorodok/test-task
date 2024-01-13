@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"sync"
+	"sync/atomic"
 	"unicode/utf8"
 )
 
@@ -35,27 +36,21 @@ func (t *tokenizer) read() (int, []byte, error) {
 	if len(t.oldBuf) != 0 {
 		oldBufLen := len(t.oldBuf)
 
-		// Copy oldBuf to buf
-		copied := copy(t.buf[:oldBufLen], t.oldBuf[:oldBufLen])
+		_ = copy(t.buf[:oldBufLen], t.oldBuf[:oldBufLen])
+		t.oldBuf = nil
 
-		// Read additional data into buf
 		n, err := t.source.Read(t.buf[oldBufLen:])
-
-		log.Println("read", n, "bytes")
-		log.Println("copied", copied, "bytes from oldBuf")
-
 		if err != nil {
 			if errors.Is(err, io.EOF) {
-				log.Println("buffer content on error:", string(t.buf[:oldBufLen+n]))
 				return len(t.buf[:oldBufLen+n]), t.buf[:oldBufLen+n], nil
 			}
+
 			return -1, nil, err
 		}
 
 		return oldBufLen + n, t.buf[:oldBufLen+n], err
 	}
 
-	// No old buffer, simply read into buf
 	n, err := t.source.Read(t.buf)
 	return n, t.buf, err
 }
@@ -64,29 +59,42 @@ func (t *tokenizer) NextWordLen() ([]byte, int, error) {
 	t.nextWordLenMu.Lock()
 	defer t.nextWordLenMu.Unlock()
 
-	n, buf, err := t.read()
-	if err != nil {
-		log.Println(err)
-		return nil, -1, err
-	}
+	var result []byte
+	var wordLen int
 
-	var r rune
-	var step int
-
-	for offset := 0; offset < n; offset += step {
-		r, step = utf8.DecodeRune(buf[offset:])
-		if step == 0 {
+	for {
+		n, buf, err := t.read()
+		if err != nil {
+			t.buf = nil
+			t.oldBuf = nil
+			log.Println(err)
 			return nil, -1, err
 		}
 
-		if isSpace(r) {
-			t.oldBuf = buf[offset+1:]
-			// log.Println(string(buf))
-			return buf[:offset], offset, nil
+		if n == 0 {
+			break
+		}
+
+		var r rune
+		var step int
+
+		for offset := 0; offset < n; offset += step {
+			r, step = utf8.DecodeRune(buf[offset:])
+			if step == 0 {
+				return nil, -1, err
+			}
+
+			if isSpace(r) {
+				t.oldBuf = buf[offset+step:]
+				return result, wordLen, nil
+			}
+
+			result = append(result, byte(r))
+			wordLen += step
 		}
 	}
 
-	return nil, -1, ErrNotFoundSpace
+	return result, wordLen, nil
 }
 
 func NewTokenizer(source io.Reader) *tokenizer {
@@ -95,6 +103,7 @@ func NewTokenizer(source io.Reader) *tokenizer {
 		// 1 byte = uint8
 		// buf: make([]byte, 1024),
 		buf: make([]byte, 24),
+		// buf: make([]byte, 2),
 	}
 }
 
@@ -107,12 +116,19 @@ func main() {
 	defer file.Close()
 
 	tokenizer := NewTokenizer(file)
+	var counter atomic.Uint64
 
 	for {
 		word, wordLen, err := tokenizer.NextWordLen()
 		if err != nil {
 			break
 		}
+		if wordLen == 0 {
+			continue
+		}
+
 		log.Println(wordLen, string(word))
+		counter.Add(1)
 	}
+	log.Println(counter.Load())
 }

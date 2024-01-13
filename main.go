@@ -35,19 +35,27 @@ func (t *tokenizer) read() (int, []byte, error) {
 	if len(t.oldBuf) != 0 {
 		oldBufLen := len(t.oldBuf)
 
-		stubBuffer := make([]byte, 24)
+		// Copy oldBuf to buf
+		copied := copy(t.buf[:oldBufLen], t.oldBuf[:oldBufLen])
 
-		n, err := t.source.Read(stubBuffer[oldBufLen:])
+		// Read additional data into buf
+		n, err := t.source.Read(t.buf[oldBufLen:])
 
-		copy(stubBuffer[:oldBufLen], t.oldBuf[:oldBufLen])
+		log.Println("read", n, "bytes")
+		log.Println("copied", copied, "bytes from oldBuf")
 
-		log.Println("after transform", stubBuffer, n, err)
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				log.Println("buffer content on error:", string(t.buf[:oldBufLen+n]))
+				return len(t.buf[:oldBufLen+n]), t.buf[:oldBufLen+n], nil
+			}
+			return -1, nil, err
+		}
 
-		log.Println(string(stubBuffer))
-
-		return len(stubBuffer), stubBuffer, err
+		return oldBufLen + n, t.buf[:oldBufLen+n], err
 	}
 
+	// No old buffer, simply read into buf
 	n, err := t.source.Read(t.buf)
 	return n, t.buf, err
 }
@@ -73,6 +81,7 @@ func (t *tokenizer) NextWordLen() ([]byte, int, error) {
 
 		if isSpace(r) {
 			t.oldBuf = buf[offset+1:]
+			// log.Println(string(buf))
 			return buf[:offset], offset, nil
 		}
 	}
@@ -84,6 +93,7 @@ func NewTokenizer(source io.Reader) *tokenizer {
 	return &tokenizer{
 		source: source,
 		// 1 byte = uint8
+		// buf: make([]byte, 1024),
 		buf: make([]byte, 24),
 	}
 }
@@ -98,33 +108,11 @@ func main() {
 
 	tokenizer := NewTokenizer(file)
 
-	word, wordLen, err := tokenizer.NextWordLen()
-	log.Println(wordLen, string(word))
-
-	word, wordLen, err = tokenizer.NextWordLen()
-	log.Println(wordLen, string(word))
-
-	word, wordLen, err = tokenizer.NextWordLen()
-	log.Println(wordLen, string(word))
-
-	word, wordLen, err = tokenizer.NextWordLen()
-	log.Println(wordLen, string(word))
-
-	word, wordLen, err = tokenizer.NextWordLen()
-	log.Println(wordLen, string(word))
-
-	word, wordLen, err = tokenizer.NextWordLen()
-	log.Println(wordLen, string(word))
-
-	word, wordLen, err = tokenizer.NextWordLen()
-	log.Println(wordLen, string(word))
-
-	word, wordLen, err = tokenizer.NextWordLen()
-	log.Println(wordLen, string(word))
-
-	word, wordLen, err = tokenizer.NextWordLen()
-	log.Println(wordLen, string(word))
-
-	word, wordLen, err = tokenizer.NextWordLen()
-	log.Println(wordLen, string(word))
+	for {
+		word, wordLen, err := tokenizer.NextWordLen()
+		if err != nil {
+			break
+		}
+		log.Println(wordLen, string(word))
+	}
 }

@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 	"unicode/utf8"
 )
 
@@ -102,9 +103,9 @@ func NewTokenizer(source io.Reader) *tokenizer {
 	return &tokenizer{
 		source: source,
 		// 1 byte = uint8
-		// buf: make([]byte, 1024),
+		buf: make([]byte, 1024),
 		// buf: make([]byte, 24),
-		buf: make([]byte, 2),
+		// buf: make([]byte, 2),
 	}
 }
 
@@ -357,12 +358,21 @@ func NewAnalyticsConsumer() *AnalyticsConsumer {
 	}
 }
 
+func WithFileDuration(fn func(File)) func(File) {
+	start := time.Now()
+	return func(file File) {
+		fn(file)
+		end := time.Since(start)
+		log.Printf("%s: took %s", file.GetFilename(), end)
+	}
+}
+
 func main() {
 	var files StringArrayVar
 	flag.Var(&files, "file", "Select a file to process")
 	flag.Parse()
 
-	var readers []File
+	var filesProxy []File
 
 	for _, path := range files {
 		if IsRemoteFile(path) {
@@ -371,7 +381,7 @@ func main() {
 				log.Printf("Skip file `%s` remote file. Err: %s", path, err)
 				continue
 			}
-			readers = append(readers, file)
+			filesProxy = append(filesProxy, file)
 			defer file.Close()
 			continue
 		}
@@ -387,39 +397,44 @@ func main() {
 			continue
 		}
 
-		readers = append(readers, file)
+		filesProxy = append(filesProxy, file)
 		defer file.Close()
 	}
 
-	BatchExec(readers, 1, func(file File) {
-		defer file.Close()
-		tokenizer := NewTokenizer(file)
-		eventBus := make(chan int, 1)
+	start := time.Now()
+	BatchExec(filesProxy, 2, WithFileDuration(
+		func(file File) {
+			defer file.Close()
+			tokenizer := NewTokenizer(file)
+			eventBus := make(chan int, 1)
 
-		// The data analytics may be different types of services/storages/brokers
-		// Also, the data may be in different shapes/formats
-		analytics := NewAnalyticsConsumer()
-		// Also, good practice here to use context for canceling the process
-		go analytics.Consume(eventBus)
+			// The data analytics may be different types of services/storages/brokers
+			// Also, the data may be in different shapes/formats
+			analytics := NewAnalyticsConsumer()
+			// Also, good practice here to use context for canceling the process
+			go analytics.Consume(eventBus)
 
-		for {
-			_, wordLen, err := tokenizer.NextWordLen()
-			if err != nil {
-				break
+			for {
+				_, wordLen, err := tokenizer.NextWordLen()
+				if err != nil {
+					break
+				}
+
+				if wordLen == 0 {
+					continue
+				}
+
+				eventBus <- wordLen
 			}
 
-			if wordLen == 0 {
-				continue
+			close(eventBus)
+
+			select {
+			case <-analytics.Done():
+				analytics.ShowAnalytics(file.GetFilename())
 			}
-
-			eventBus <- wordLen
-		}
-
-		close(eventBus)
-
-		select {
-		case <-analytics.Done():
-			analytics.ShowAnalytics(file.GetFilename())
-		}
-	})
+		}),
+	)
+	end := time.Since(start)
+	log.Printf("Process: took %s", end)
 }

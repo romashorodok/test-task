@@ -8,8 +8,8 @@ import (
 )
 
 func WithFileDuration(fn func(protocol.File)) func(protocol.File) {
-	start := time.Now()
 	return func(file protocol.File) {
+		start := time.Now()
 		fn(file)
 		end := time.Since(start)
 		log.Printf("%s:  took %s", file.GetFilename(), end)

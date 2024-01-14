@@ -48,14 +48,17 @@ func processFiles(filesArg file.StringArrayVar) []protocol.File {
 
 func main() {
 	var filesArg file.StringArrayVar
+	var BatchArg int
+
 	flag.Var(&filesArg, "file", "Select a file to process")
+	flag.IntVar(&BatchArg, "batch", 2, "Size of paralell batch processing")
 	flag.Parse()
 
 	files := processFiles(filesArg)
 
 	start := time.Now()
 
-	utils.BatchExec(files, 2, utils.WithFileDuration(
+	utils.BatchExec(files, BatchArg, utils.WithFileDuration(
 		func(f protocol.File) {
 			defer f.Close()
 

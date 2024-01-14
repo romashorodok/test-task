@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"errors"
 	"flag"
 	"io"
@@ -46,26 +47,64 @@ func processFiles(filesArg file.StringArrayVar) []protocol.File {
 	return result
 }
 
+func myApproach(f protocol.File, eventBus chan int) error {
+	buf := buffer.NewBuffer(f, 1024)
+	defer buf.Close()
+
+	tokenzr := tokenizer.NewTokenizer(buf)
+
+	var topLevelError error
+	for {
+		_, wordLen, err := tokenzr.NextWordLen()
+		if err != nil {
+			if !errors.Is(err, io.EOF) {
+				topLevelError = err
+			}
+			break
+		}
+		if wordLen == 0 {
+			continue
+		}
+
+		eventBus <- wordLen
+	}
+	return topLevelError
+}
+
+func stdlibApproach(f protocol.File, eventBus chan int) error {
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 1024), 1024)
+	scanner.Split(bufio.ScanWords)
+
+	for scanner.Scan() {
+		eventBus <- len(scanner.Bytes())
+	}
+
+	return scanner.Err()
+}
+
 func main() {
 	var filesArg file.StringArrayVar
-	var BatchArg int
+	var batchArg int
+	var useStd bool
 
 	flag.Var(&filesArg, "file", "Select a file to process")
-	flag.IntVar(&BatchArg, "batch", 2, "Size of paralell batch processing")
+	flag.IntVar(&batchArg, "batch", 2, "Size of paralell batch processing")
+	flag.BoolVar(&useStd, "std", false, "Use go stdlib approach")
 	flag.Parse()
+
+	log.Printf("Running stdlib approach? %t", useStd)
 
 	files := processFiles(filesArg)
 
 	start := time.Now()
 
-	utils.BatchExec(files, BatchArg, utils.WithFileDuration(
+	utils.BatchExec(files, batchArg, utils.WithFileDuration(
 		func(f protocol.File) {
 			defer f.Close()
 
-			buf := buffer.NewBuffer(f, 1024)
-			defer buf.Close()
-
-			tokenzr := tokenizer.NewTokenizer(buf)
 			eventBus := make(chan int, 1)
 
 			// The data analytics may be different types of services/storages/brokers
@@ -74,19 +113,11 @@ func main() {
 			go analytics.Consume(eventBus)
 
 			var topLevelError error
-			for {
-				_, wordLen, err := tokenzr.NextWordLen()
-				if err != nil {
-					if !errors.Is(err, io.EOF) {
-						topLevelError = err
-					}
-					break
-				}
-				if wordLen == 0 {
-					continue
-				}
 
-				eventBus <- wordLen
+			if useStd {
+				topLevelError = stdlibApproach(f, eventBus)
+			} else {
+				topLevelError = myApproach(f, eventBus)
 			}
 
 			close(eventBus)

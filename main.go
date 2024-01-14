@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -120,9 +121,19 @@ func (s *StringArrayVar) String() string {
 
 var _ flag.Value = (*StringArrayVar)(nil)
 
+type File interface {
+	io.ReadCloser
+	GetFilename() string
+}
+
 type LocalFile struct {
 	path string
 	file *os.File
+}
+
+// GetFilename implements File.
+func (f *LocalFile) GetFilename() string {
+	return f.path
 }
 
 func (f *LocalFile) Close() error {
@@ -136,7 +147,7 @@ func (f *LocalFile) Read(p []byte) (n int, err error) {
 	return f.file.Read(p)
 }
 
-var _ io.ReadCloser = (*LocalFile)(nil)
+var _ File = (*LocalFile)(nil)
 
 func NewLocalFile(path string) (*LocalFile, error) {
 	file, err := os.OpenFile(path, os.O_RDONLY, os.ModeType)
@@ -157,6 +168,10 @@ type RemoteFile struct {
 	contentWg sync.WaitGroup
 }
 
+func (f *RemoteFile) GetFilename() string {
+	return f.path
+}
+
 func (f *RemoteFile) Close() error {
 	if f.content == nil {
 		return errors.New("content not exist")
@@ -172,7 +187,7 @@ func (f *RemoteFile) Read(p []byte) (n int, err error) {
 	return f.content.Read(p)
 }
 
-var _ io.ReadCloser = (*RemoteFile)(nil)
+var _ File = (*RemoteFile)(nil)
 
 func NewRemoteFile(path string) (*RemoteFile, error) {
 	f := &RemoteFile{path: path}
@@ -267,12 +282,87 @@ func GetFileType(path string) string {
 	return string(result)
 }
 
+type AnalyticsConsumer struct {
+	state map[string]*atomic.Uint64
+
+	doneCh chan struct{}
+}
+
+func counterInit() *atomic.Uint64 {
+	var counter atomic.Uint64
+	counter.Add(1)
+	return &counter
+}
+
+const LARGER_THEN_9_KEY = ">9"
+
+func (a *AnalyticsConsumer) Consume(event chan int) {
+	for wordLen := range event {
+		if wordLen <= 9 && wordLen > 0 {
+			key := fmt.Sprint(wordLen)
+			counter, exist := a.state[key]
+			if !exist {
+				a.state[key] = counterInit()
+				continue
+			}
+			counter.Add(1)
+		}
+
+		if wordLen > 9 {
+			counter, exist := a.state[LARGER_THEN_9_KEY]
+			if !exist {
+				a.state[LARGER_THEN_9_KEY] = counterInit()
+				continue
+			}
+			counter.Add(1)
+		}
+
+		if wordLen <= 0 {
+			log.Println("Consumed zero or negative value.")
+			continue
+		}
+	}
+	close(a.doneCh)
+}
+
+func (a *AnalyticsConsumer) ShowAnalytics(filename string) {
+	result := fmt.Sprintf("%s:  ", filename)
+
+	for i := 0; i <= 9; i++ {
+		counter, exists := a.state[fmt.Sprint(i)]
+		if !exists {
+			continue
+		}
+		result += fmt.Sprintf("[%s] = %s, ", fmt.Sprint(i), strconv.FormatUint(counter.Load(), 10))
+	}
+
+	counter, exists := a.state[LARGER_THEN_9_KEY]
+	if exists {
+		result += fmt.Sprintf("[%s] = %s", LARGER_THEN_9_KEY, strconv.FormatUint(counter.Load(), 10))
+	} else {
+		result = strings.TrimRight(result, ", ")
+	}
+
+	log.Println(result)
+}
+
+func (a *AnalyticsConsumer) Done() chan struct{} {
+	return a.doneCh
+}
+
+func NewAnalyticsConsumer() *AnalyticsConsumer {
+	return &AnalyticsConsumer{
+		state:  make(map[string]*atomic.Uint64),
+		doneCh: make(chan struct{}),
+	}
+}
+
 func main() {
 	var files StringArrayVar
 	flag.Var(&files, "file", "Select a file to process")
 	flag.Parse()
 
-	var readers []io.ReadCloser
+	var readers []File
 
 	for _, path := range files {
 		if IsRemoteFile(path) {
@@ -301,26 +391,35 @@ func main() {
 		defer file.Close()
 	}
 
-	BatchExec(readers, 1, func(reader io.ReadCloser) {
-		defer reader.Close()
+	BatchExec(readers, 1, func(file File) {
+		defer file.Close()
+		tokenizer := NewTokenizer(file)
+		eventBus := make(chan int, 1)
 
-		tokenizer := NewTokenizer(reader)
-		var counter atomic.Uint64
+		// The data analytics may be different types of services/storages/brokers
+		// Also, the data may be in different shapes/formats
+		analytics := NewAnalyticsConsumer()
+		// Also, good practice here to use context for canceling the process
+		go analytics.Consume(eventBus)
 
 		for {
-			word, wordLen, err := tokenizer.NextWordLen()
+			_, wordLen, err := tokenizer.NextWordLen()
 			if err != nil {
 				break
 			}
+
 			if wordLen == 0 {
 				continue
 			}
-			_ = word
 
-			// log.Println(wordLen, string(word))
-			counter.Add(1)
+			eventBus <- wordLen
 		}
 
-		log.Println(counter.Load())
+		close(eventBus)
+
+		select {
+		case <-analytics.Done():
+			analytics.ShowAnalytics(file.GetFilename())
+		}
 	})
 }

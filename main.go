@@ -8,7 +8,9 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/exec"
 	"regexp"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"unicode/utf8"
@@ -71,7 +73,7 @@ func (t *tokenizer) NextWordLen() ([]byte, int, error) {
 		}
 
 		if n == 0 {
-			return result, wordLen, io.EOF
+			return nil, -1, io.EOF
 		}
 
 		var r rune
@@ -243,6 +245,28 @@ func BatchExec[T any](vals []T, batchSize int, fn func(T)) {
 	wg.Wait()
 }
 
+func GetFileType(path string) string {
+	cmd := exec.Command("file", path)
+
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		log.Println("Unable read stdout")
+	}
+	defer stdout.Close()
+
+	var result []byte
+	go func() {
+		result, _ = io.ReadAll(stdout)
+	}()
+
+	if err = cmd.Run(); err != nil {
+		log.Println(err)
+		return ""
+	}
+
+	return string(result)
+}
+
 func main() {
 	var files StringArrayVar
 	flag.Var(&files, "file", "Select a file to process")
@@ -262,11 +286,17 @@ func main() {
 			continue
 		}
 
+		if fileType := GetFileType(path); strings.Contains(fileType, "executable") {
+			log.Printf("Skip file `%s` because it's executable!", path)
+			continue
+		}
+
 		file, err := NewLocalFile(path)
 		if err != nil {
 			log.Printf("Skip file `%s` local file. Err: %s", path, err)
 			continue
 		}
+
 		readers = append(readers, file)
 		defer file.Close()
 	}
@@ -280,14 +310,14 @@ func main() {
 		for {
 			word, wordLen, err := tokenizer.NextWordLen()
 			if err != nil {
-				log.Println(err)
 				break
 			}
 			if wordLen == 0 {
 				continue
 			}
+			_ = word
 
-			log.Println(wordLen, string(word))
+			// log.Println(wordLen, string(word))
 			counter.Add(1)
 		}
 

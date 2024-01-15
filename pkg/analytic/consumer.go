@@ -24,7 +24,8 @@ func counterInit() *atomic.Uint64 {
 
 func (a *AnalyticsConsumer) Consume(event chan int) {
 	for wordLen := range event {
-		if wordLen <= 9 && wordLen > 0 {
+		switch {
+		case wordLen <= 9 && wordLen > 0:
 			key := fmt.Sprint(wordLen)
 			counter, exist := a.state[key]
 			if !exist {
@@ -34,10 +35,8 @@ func (a *AnalyticsConsumer) Consume(event chan int) {
 			}
 			counter.Add(1)
 			a.total.Add(1)
-			continue
-		}
 
-		if wordLen > 9 {
+		case wordLen > 9:
 			counter, exist := a.state[LARGER_THEN_9_KEY]
 			if !exist {
 				a.state[LARGER_THEN_9_KEY] = counterInit()
@@ -46,12 +45,9 @@ func (a *AnalyticsConsumer) Consume(event chan int) {
 			}
 			counter.Add(1)
 			a.total.Add(1)
-			continue
-		}
 
-		if wordLen <= 0 {
+		default:
 			log.Println("Consumed zero or negative value.")
-			continue
 		}
 	}
 	close(a.doneCh)
@@ -76,7 +72,7 @@ func (a *AnalyticsConsumer) ShowAnalytics(filename string) {
 	}
 
 	log.Println(result)
-	log.Printf("%s:  word: %s", filename, strconv.FormatUint(a.total.Load(), 10))
+	log.Printf("%s:  total words: %s", filename, strconv.FormatUint(a.total.Load(), 10))
 }
 
 func (a *AnalyticsConsumer) Done() chan struct{} {

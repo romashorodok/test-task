@@ -25,11 +25,12 @@ func (t *Buffer) Read() (int, []byte, error) {
 
 		n, err := t.source.Read(t.buf[oldBufLen:])
 		if err != nil {
-			if errors.Is(err, io.EOF) {
+			switch {
+			case errors.Is(err, io.EOF):
 				return len(t.buf[:oldBufLen+n]), t.buf[:oldBufLen+n], nil
+			default:
+				return -1, nil, err
 			}
-
-			return -1, nil, err
 		}
 
 		return oldBufLen + n, t.buf[:oldBufLen+n], err
